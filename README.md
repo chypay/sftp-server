@@ -20,7 +20,7 @@
 
 ```bash
 # 下载
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/sftp-nginx/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/chypay/sftp-nginx/main/install.sh -o install.sh
 chmod +x install.sh
 
 # 安装（staging 先测）
