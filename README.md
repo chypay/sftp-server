@@ -15,12 +15,13 @@
 - **原生 ACME 自动 SSL** — Nginx 内置 ACME 模块，无需 certbot/cron，零 reload 续期
 - **ACL 精细权限** — Nginx 通过 ACL 读取文件，与用户权限完全解耦
 - **交互式管理菜单** — 命令行 `sftp-manager` 管理用户增删、ACL 修复、服务重启
+- **脚本使用统计** — 每次执行自动落库，随时查看今日执行次数与累计执行次数
 
 ## 📦 安装
 
 ```bash
 # 下载
-curl -fsSL https://raw.githubusercontent.com/chypay/sftp-server/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/chypay/sftp-server/master/install.sh -o install.sh
 chmod +x install.sh
 
 # 安装（staging 先测）
@@ -51,6 +52,7 @@ sudo ./install.sh uploader example.com prod
    7)  重启 Nginx
    8)  重启 SSH
    9)  服务状态
+  10)  脚本使用统计（今日/累计）
    0)  退出
 ```
 
@@ -67,6 +69,28 @@ sudo ./install.sh uploader example.com prod
 | 7 | 重载 Nginx（先校验配置） |
 | 8 | 重启 SSH（先校验配置） |
 | 9 | 查看服务状态（nginx/ssh 运行状态、站点列表、磁盘、证书） |
+| 10 | 脚本使用统计：今日/累计执行次数、按天与按域名汇总、最近 10 次执行明细 |
+
+## 📊 使用统计
+
+脚本每次执行都会在 `/var/lib/sftp-nginx/install-runs.log` 追加一条记录（TSV 格式）：
+
+```
+时间                    域名                  ACME 环境   操作人   主机名   结果
+2026-11-17 15:20:01     example.com           prod        root     vps-01   成功
+```
+
+- **开始安装时** 先记账再动手：中途失败也会留下记录，结束时回填该行结果为 `成功` / `失败`
+- **安装收尾** 会打印「今日执行次数 / 累计执行次数」
+- **随时查看**：
+
+```bash
+sudo bash install.sh --stats     # 今日次数、累计次数、最近 10 次明细
+sftp-manager                     # 菜单 → 10) 脚本使用统计
+```
+
+- `sftp-manager` 自身的打开次数单独记在 `/var/lib/sftp-nginx/manager-runs.log`，与管理菜单里展示的统计互不混淆
+- 统计文件是纯文本，可直接 `cat` / `tail -f` 查看，也可清空归零（`> /var/lib/sftp-nginx/install-runs.log`）
 
 ## 🏗️ 架构
 
@@ -101,6 +125,10 @@ Nginx (nginx 用户) 读取并对外提供 HTTPS 服务
 /var/cache/nginx/acme-<domain>/ ← ACME 状态（账号/证书）
 
 /etc/sftp-nginx/<user>.conf    ← 用户元数据
+
+/var/lib/sftp-nginx/
+├── install-runs.log           ← install.sh 执行记录（今日/累计统计来源）
+└── manager-runs.log           ← sftp-manager 打开记录
 ```
 
 ## 🔐 权限模型
