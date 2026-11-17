@@ -5,36 +5,139 @@
 #
 #  用法:
 #    sudo bash install.sh <sftp_user> <domain> [staging|prod]
+#    sudo bash install.sh --stats      只查看统计，不执行安装
+#    sudo bash install.sh --help       查看帮助
 #
 #  示例:
 #    sudo bash install.sh uploader example.com staging
 #    sudo bash install.sh uploader example.com prod
 #
 #  安装完成后可通过 `sftp-manager` 命令进入管理菜单
+#
+#  脚本使用统计:
+#    每次执行都会向 ${RUN_LOG} 追加一条记录，
+#    安装开始时与结束时会显示「今日执行次数 / 累计执行次数」。
 # ==============================================================================
 set -euo pipefail
+
+# ── 颜色 ──────────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+
+info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
+step()    { CURRENT_STEP="$*"; echo -e "\n${CYAN}${BOLD}═══ $* ═══${NC}"; }
+err_exit(){ echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+
+# 出错时指出失败阶段与行号，比裸 exit 更好排查
+CURRENT_STEP="初始化"
+trap 'echo -e "${RED}[ERROR]${NC} 执行失败于第 ${LINENO} 行（阶段: ${CURRENT_STEP}）" >&2' ERR
+
+# ── 统计配置 ──────────────────────────────────────────────────────────────────
+STATS_DIR="/var/lib/sftp-nginx"
+RUN_LOG="${STATS_DIR}/install-runs.log"
+
+# 记录一次执行（TSV：时间 / 域名 / ACME 环境 / 操作人 / 主机名 / 结果）
+# 末尾追加，永不覆盖历史
+record_run() {
+    local status="${1:-ok}"
+    mkdir -p "$STATS_DIR" 2>/dev/null || return 0
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" \
+        "${SITE_DOMAIN:-未知}" \
+        "${ACME_ENV:-未知}" \
+        "${SUDO_USER:-$(whoami)}" \
+        "$(hostname)" \
+        "$status" >> "$RUN_LOG" 2>/dev/null || true
+}
+
+# 累计执行次数（含失败记录）
+stats_total_runs() {
+    [[ -f "$RUN_LOG" ]] || { echo 0; return 0; }
+    awk 'END { print NR+0 }' "$RUN_LOG"
+}
+
+# 今日执行次数
+stats_today_runs() {
+    [[ -f "$RUN_LOG" ]] || { echo 0; return 0; }
+    awk -v d="$(date '+%Y-%m-%d')" 'index($0, d) == 1 { n++ } END { print n+0 }' "$RUN_LOG"
+}
+
+# 统计面板（install.sh --stats 与收尾汇总共用）
+show_stats() {
+    local total today last_ts last_domain last_env
+    total="$(stats_total_runs)"
+    today="$(stats_today_runs)"
+
+    echo ""
+    echo -e "  ${BOLD}脚本使用统计${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    printf '    今日执行次数:  %s 次\n' "$today"
+    printf '    累计执行次数:  %s 次\n' "$total"
+    if [[ -f "$RUN_LOG" ]] && [[ -s "$RUN_LOG" ]]; then
+        IFS=$'\t' read -r last_ts last_domain last_env _ _ _ < <(tail -n 1 "$RUN_LOG") || true
+        printf '    最近一次执行:  %s  (%s / %s)\n' "$last_ts" "$last_domain" "$last_env"
+    fi
+    printf '    统计文件:      %s\n' "$RUN_LOG"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+}
+
+usage() {
+    cat <<EOF
+用法: $0 <sftp_user> <domain> [staging|prod]
+
+  sftp_user    SFTP 登录用户名
+  domain       站点域名（需解析到本机）
+  staging|prod ACME 环境，默认 staging
+
+其他参数:
+  --stats      只查看脚本使用统计（今日执行次数 / 累计执行次数）
+  --help       显示本帮助
+
+示例:
+  sudo bash $0 uploader example.com staging
+  sudo bash $0 uploader example.com prod
+  sudo bash $0 --stats
+EOF
+}
 
 # ── 参数 ──────────────────────────────────────────────────────────────────────
 SFTP_USER="${1:-}"
 SITE_DOMAIN="${2:-}"
 ACME_ENV="${3:-staging}"
 
+case "${1:-}" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --stats)
+        show_stats
+        if [[ "$(stats_total_runs)" -gt 0 ]]; then
+            echo ""
+            echo -e "  ${BOLD}最近 10 次执行记录${NC}"
+            echo -e "  ${DIM}时间                 域名                 环境     操作人${NC}"
+            tail -n 10 "$RUN_LOG" 2>/dev/null | \
+                awk -F'\t' '{ printf "  %-20s %-20s %-9s %s\n", $1, $2, $3, $4 }' || true
+            echo ""
+        fi
+        exit 0
+        ;;
+esac
+
 if [[ -z "$SFTP_USER" || -z "$SITE_DOMAIN" ]]; then
-    echo "用法: $0 <sftp_user> <domain> [staging|prod]"
-    echo ""
-    echo "  sftp_user   SFTP 登录用户名"
-    echo "  domain      站点域名（需解析到本机）"
-    echo "  staging|prod  ACME 环境，默认 staging"
-    echo ""
-    echo "示例:"
-    echo "  $0 uploader example.com staging"
-    echo "  $0 uploader example.com prod"
+    usage
     exit 1
 fi
 
+# 用户名 / 域名基础校验，避免带着非法值一路装到底
+[[ "$SFTP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || err_exit "用户名不合法（仅允许小写字母/数字/_/-，且不能以数字开头）: $SFTP_USER"
+[[ "$SITE_DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] || err_exit "域名格式不合法: $SITE_DOMAIN"
+
 case "$ACME_ENV" in
     staging|prod) ;;
-    *) echo "[ERROR] 第三个参数必须是 staging 或 prod"; exit 1 ;;
+    production) ACME_ENV="prod" ;;
+    *) err_exit "第三个参数必须是 staging 或 prod" ;;
 esac
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
@@ -43,15 +146,6 @@ SFTP_BASE="/var/sftp"
 WWW_BASE="/var/www"
 MANAGER_BIN="/usr/local/bin/sftp-manager"
 ADMIN_EMAIL="${ADMIN_EMAIL:-root@${SITE_DOMAIN}}"
-
-# ── 颜色 ──────────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-
-info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
-step()    { echo -e "\n${CYAN}${BOLD}═══ $* ═══${NC}"; }
-err_exit(){ echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 # ── 0. 前置检查 ───────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || err_exit "必须用 root 运行"
@@ -65,6 +159,37 @@ if [[ -f /etc/os-release ]]; then
 else
     err_exit "无法检测发行版"
 fi
+
+# ── 执行记录 ──────────────────────────────────────────────────────────────────
+# 先记账再动手：即使安装中途失败或被打断，也能留下一条记录
+mkdir -p "$STATS_DIR" 2>/dev/null || true
+record_run "进行中"
+RUN_NO="$(stats_total_runs)"
+RUN_TODAY="$(stats_today_runs)"
+
+# 回填本次执行的结果（成功/失败），便于事后区分「装成了几次」
+mark_run_status() {
+    local status="$1" idx="${RUN_NO:-0}" tmp
+    [[ -f "$RUN_LOG" ]] || return 0
+    [[ "$idx" -gt 0 ]] || return 0
+    tmp="$(mktemp)"
+    if awk -F'\t' -v OFS='\t' -v i="$idx" -v st="$status" 'NR==i { $6=st } { print }' "$RUN_LOG" > "$tmp"; then
+        mv "$tmp" "$RUN_LOG"
+    else
+        rm -f "$tmp"
+    fi
+}
+
+# 失败时标记结果并报出阶段/行号
+trap 'rc=$?; mark_run_status "失败"; echo -e "${RED}[ERROR]${NC} 执行失败于第 ${LINENO} 行（阶段: ${CURRENT_STEP}）" >&2; exit $rc' ERR
+
+echo ""
+echo -e "${CYAN}${BOLD}  ╔══════════════════════════════════════════════════╗"
+echo -e "  ║              SFTP-NGINX 安装程序                 ║"
+echo -e "  ╚══════════════════════════════════════════════════╝${NC}"
+echo -e "  ${DIM}目标: ${SFTP_USER} / ${SITE_DOMAIN} / ${ACME_ENV}${NC}"
+echo -e "  ${DIM}本次为该脚本第 ${BOLD}${RUN_NO}${NC}${DIM} 次执行，今日第 ${BOLD}${RUN_TODAY}${NC}${DIM} 次${NC}"
+show_stats
 
 # ── 1. 基础工具 ───────────────────────────────────────────────────────────────
 step "安装基础工具"
@@ -308,6 +433,9 @@ NGINX_USER="nginx"
 SFTP_BASE="/var/sftp"
 WWW_BASE="/var/www"
 CONFIG_DIR="/etc/sftp-nginx"
+STATS_DIR="/var/lib/sftp-nginx"
+RUN_LOG="${STATS_DIR}/install-runs.log"
+MER_LOG="${STATS_DIR}/manager-runs.log"
 
 # 颜色
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'
@@ -336,6 +464,13 @@ banner() {
     echo "  ╚══════════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo -e "  ${DIM}nginx: $(nginx -v 2>&1 | cut -d'/' -f2)  |  user: ${NGINX_USER}  |  $(date '+%Y-%m-%d %H:%M')${NC}"
+    # 脚本使用统计（今日/累计）
+    local _today=0 _total=0
+    if [ -f "$RUN_LOG" ]; then
+        _today=$(awk -v d="$(date '+%Y-%m-%d')" 'index($0, d) == 1 { n++ } END { print n+0 }' "$RUN_LOG")
+        _total=$(awk 'END { print NR+0 }' "$RUN_LOG")
+    fi
+    echo -e "  ${DIM}install.sh 执行: 今日 ${_today} 次 / 累计 ${_total} 次${NC}"
     echo ""
 }
 
@@ -773,6 +908,60 @@ EOF
     pause
 }
 
+menu_run_stats() {
+    banner
+    echo -e "  ${BOLD}脚本使用统计${NC}"
+    sep
+
+    local total=0 today=0 mtotal=0 mtoday=0
+    if [ -f "$RUN_LOG" ]; then
+        total=$(awk 'END { print NR+0 }' "$RUN_LOG")
+        today=$(awk -v d="$(date '+%Y-%m-%d')" 'index($0, d) == 1 { n++ } END { print n+0 }' "$RUN_LOG")
+    fi
+    if [ -f "$MER_LOG" ]; then
+        mtotal=$(awk 'END { print NR+0 }' "$MER_LOG")
+        mtoday=$(awk -v d="$(date '+%Y-%m-%d')" 'index($0, d) == 1 { n++ } END { print n+0 }' "$MER_LOG")
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}install.sh 执行次数${NC}"
+    echo -e "    今日执行:      ${GREEN}${today}${NC} 次"
+    echo -e "    累计执行:      ${GREEN}${total}${NC} 次"
+    echo ""
+    echo -e "  ${BOLD}sftp-manager 打开次数${NC}"
+    echo -e "    今日打开:      ${GREEN}${mtoday}${NC} 次"
+    echo -e "    累计打开:      ${GREEN}${mtotal}${NC} 次"
+
+    if [ "$total" -gt 0 ] || [ "$mtotal" -gt 0 ]; then
+        echo ""
+        echo -e "  ${BOLD}按天统计（最近 7 天）${NC}"
+        { [ -f "$RUN_LOG" ] && awk -F'\t' '{ split($1, a, " "); c[a[1]]++ } END { for (d in c) print d "\t" c[d] }' "$RUN_LOG" | sed 's/^/install\t/'
+          [ -f "$MER_LOG" ] && awk -F'\t' '{ split($1, a, " "); c[a[1]]++ } END { for (d in c) print d "\t" c[d] }' "$MER_LOG" | sed 's/^/manager\t/'
+        } | awk -F'\t' '{ c[$2] += $3 } END { for (d in c) print d "\t" c[d] }' | sort | tail -7 | \
+            while IFS=$'\t' read -r d n; do
+                echo -e "    ${d}  ${n} 次/日（install+manager 合计）"
+            done
+    fi
+
+    if [ "$total" -gt 0 ]; then
+        echo ""
+        echo -e "  ${BOLD}按域名统计（install.sh）${NC}"
+        awk -F'\t' '{ c[$2]++ } END { for (d in c) printf "    %-30s %s 次\n", d, c[d] }' "$RUN_LOG"
+        echo ""
+        echo -e "  ${BOLD}最近 10 次执行${NC}"
+        echo -e "    ${DIM}时间                 域名                 环境     操作人    结果${NC}"
+        tail -n 10 "$RUN_LOG" | awk -F'\t' '{ printf "    %-20s %-20s %-8s %-9s %s\n", $1, $2, $3, $4, $6 }'
+    else
+        echo ""
+        warn "  还没有安装记录（统计文件: $RUN_LOG）"
+    fi
+
+    sep
+    echo -e "  ${DIM}统计文件: $RUN_LOG${NC}"
+    echo -e "  ${DIM}          $MER_LOG${NC}"
+    pause
+}
+
 menu_change_password() {
     banner
     echo -e "  ${BOLD}修改 SFTP 用户密码${NC}"
@@ -795,6 +984,10 @@ menu_change_password() {
 
 # ── 主菜单 ────────────────────────────────────────────────────────────────────
 main() {
+    # 记录一次 sftp-manager 打开（与 install.sh 统计分开计数）
+    mkdir -p "$STATS_DIR" 2>/dev/null && \
+        printf '%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${SUDO_USER:-$(whoami)}" >> "$MER_LOG" 2>/dev/null || true
+
     while true; do
         banner
         echo -e "  ${BOLD}请选择操作:${NC}"
@@ -808,10 +1001,11 @@ main() {
         echo -e "  ${BLUE} 7)${NC}  重启 Nginx"
         echo -e "  ${BLUE} 8)${NC}  重启 SSH"
         echo -e "  ${BLUE} 9)${NC}  服务状态"
+        echo -e "  ${GREEN}10)${NC}  脚本使用统计（今日/累计）"
         echo -e "  ${DIM} 0)  退出${NC}"
         echo ""
         sep
-        read -rp "  输入选项 [0-9]: " choice
+        read -rp "  输入选项 [0-10]: " choice
 
         case "$choice" in
             1) menu_add_user ;;
@@ -823,6 +1017,7 @@ main() {
             7) menu_restart_nginx ;;
             8) menu_restart_ssh ;;
             9) menu_status ;;
+            10) menu_run_stats ;;
             0) echo ""; info "再见 👋"; exit 0 ;;
             *) warn "无效选项"; sleep 1 ;;
         esac
@@ -856,6 +1051,8 @@ ACME_ENV=${ACME_ENV}
 EOF
 
 # ── 15. 完成 ──────────────────────────────────────────────────────────────────
+mark_run_status "成功"
+
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                    🎉 安装完成！                            ║${NC}"
@@ -876,6 +1073,9 @@ echo ""
 echo -e "  ${CYAN}管理${NC}"
 echo "    命令:        sftp-manager"
 echo ""
+show_stats
+echo ""
+echo -e "  ${DIM}随时查看统计: sudo bash install.sh --stats  |  sftp-manager → 10${NC}"
 if [[ "$ACME_ENV" == "staging" ]]; then
     echo -e "  ${YELLOW}⚠️  STAGING 模式 — 切 prod:${NC}"
     echo "    1. 编辑 /etc/nginx/conf.d/acme-${SITE_DOMAIN}.conf"
