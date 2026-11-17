@@ -14,7 +14,7 @@
 - **Nginx n.wtf 源** — Mainline 最新版，自带 HTTP/3、Brotli、Zstd、ACME 等模块
 - **原生 ACME 自动 SSL** — Nginx 内置 ACME 模块，无需 certbot/cron，零 reload 续期
 - **ACL 精细权限** — Nginx 通过 ACL 读取文件，与用户权限完全解耦
-- **交互式管理菜单** — 命令行 `sftp-manager` 管理用户增删、ACL 修复、服务重启
+- **交互式管理菜单** — 命令 `sftp` 管理用户增删、ACL 修复、服务重启
 - **脚本使用统计** — 每次执行自动落库，随时查看今日执行次数与累计执行次数
 
 ## 📦 安装
@@ -33,7 +33,9 @@ sudo ./install.sh uploader example.com prod
 
 ## 🔧 管理
 
-安装完成后，输入 `sftp-manager` 进入交互式管理菜单：
+安装完成后，输入 `sftp` 进入交互式管理菜单（直接敲 `sftp` 就是菜单，不带参数）：
+
+> ⚠️ 注意：系统自带的 OpenSSH 客户端也叫 `sftp`（/usr/bin/sftp），本脚本会把管理菜单装到 `/usr/local/bin/sftp` 并把它排在 PATH 前面，因此**裸敲 `sftp` 进入的是管理菜单**。需要用原生 SFTP 客户端传输文件时，请用绝对路径 `/usr/bin/sftp user@host`，或在其他终端里改回原客户端。
 
 ```
 ╔══════════════════════════════════════════════════╗
@@ -86,10 +88,10 @@ sudo ./install.sh uploader example.com prod
 
 ```bash
 sudo bash install.sh --stats     # 今日次数、累计次数、最近 10 次明细
-sftp-manager                     # 菜单 → 10) 脚本使用统计
+sftp                             # 菜单 → 10) 脚本使用统计
 ```
 
-- `sftp-manager` 自身的打开次数单独记在 `/var/lib/sftp-nginx/manager-runs.log`，与管理菜单里展示的统计互不混淆
+- 管理菜单自身的打开次数单独记在 `/var/lib/sftp-nginx/manager-runs.log`，与 install.sh 的统计互不混淆
 - 统计文件是纯文本，可直接 `cat` / `tail -f` 查看，也可清空归零（`> /var/lib/sftp-nginx/install-runs.log`）
 
 ## 🏗️ 架构
@@ -108,6 +110,8 @@ Nginx (nginx 用户) 读取并对外提供 HTTPS 服务
         ▼
 浏览器访问 https://<domain> (HTTP/3 + Brotli + Zstd)
 ```
+
+> nginx 站点里的 `root` 直接指向 `/var/sftp/<user>/var/www/<domain>`（chroot 内的真实路径），`/var/www/<domain>` 只是 chroot 内部的视角，nginx 不读它。
 
 ## 📁 目录结构
 
@@ -128,7 +132,7 @@ Nginx (nginx 用户) 读取并对外提供 HTTPS 服务
 
 /var/lib/sftp-nginx/
 ├── install-runs.log           ← install.sh 执行记录（今日/累计统计来源）
-└── manager-runs.log           ← sftp-manager 打开记录
+└── manager-runs.log           ← sftp 管理菜单打开记录
 ```
 
 ## 🔐 权限模型
